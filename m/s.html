@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https://i.ytimg.com; font-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https://i.ytimg.com; connect-src https://www.youtube.com; font-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#ffffff">
 <title>Minim</title>
 <meta name="description" content="A song or a playlist shared from Minim, the minimal music app.">
@@ -25,9 +25,9 @@ html{-webkit-text-size-adjust:100%}
 body{font-family:Poppins,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;min-height:100dvh;transition:background-color .5s ease,color .5s ease;-webkit-font-smoothing:antialiased}
 a{color:inherit}
 .wrap{max-width:440px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) 24px max(36px,env(safe-area-inset-bottom))}
-header{display:flex;align-items:center;gap:10px;height:44px}
-header img{width:30px;height:30px;border-radius:50%}
+header{display:flex;align-items:center;justify-content:center;height:44px}
 header b{font-weight:600;font-size:20px;letter-spacing:-.2px}
+.songs li.pending .n,.songs li.pending .a,.songs li.gone .n,.songs li.gone .a{opacity:.5}
 .label{margin-top:28px;text-align:center;font-weight:600;font-size:13px;letter-spacing:.8px;text-transform:uppercase;opacity:.7}
 .art{position:relative;width:min(72vw,280px);aspect-ratio:1;margin:18px auto 0;border-radius:22px;overflow:hidden;background:var(--soft);box-shadow:0 18px 50px rgba(0,0,0,.18)}
 .art.grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
@@ -73,7 +73,7 @@ footer{margin-top:30px;text-align:center;font-size:12px;opacity:.55;line-height:
 </head>
 <body>
 <div class="wrap">
-  <header><img src="/m/minim.png" alt="" width="30" height="30"><b>minim</b></header>
+  <header><b>minim</b></header>
 
   <main id="shared" hidden>
     <p class="label">Shared with you</p>
@@ -108,7 +108,7 @@ footer{margin-top:30px;text-align:center;font-size:12px;opacity:.55;line-height:
     <a class="btn primary" href="https://github.com/UniquelyGaurab/minim/releases/latest" rel="noopener noreferrer">Download Minim for Android</a>
   </section>
 
-  <footer>This page reads the link on your phone. Nothing about it is sent anywhere: no analytics, no cookies.</footer>
+  <footer>This page reads the link on your phone. No analytics, no cookies. Song names and covers come straight from YouTube.</footer>
 </div>
 
 <script>
@@ -117,7 +117,7 @@ footer{margin-top:30px;text-align:center;font-size:12px;opacity:.55;line-height:
    /m/s#1.<base64url(deflate-raw(JSON))>   song      {"i","t","a","n"}
    /m/p#1.<...>                            playlist  {"l","n","s":[[id,title,artist],...]}
    Everything after the # stays in the browser. */
-var VERSION = 1, MAX_SONGS = 100, MAX_JSON = 131072, MAX_PAYLOAD = 32768;
+var VERSION = 1, PLAYLIST_VERSION = 2, MAX_SONGS = 100, MAX_JSON = 131072, MAX_PAYLOAD = 32768;
 var ID = /^[A-Za-z0-9_-]{11}$/;
 
 /* ---- a small raw-inflate (RFC 1951), for browsers without DecompressionStream('deflate-raw') ---- */
@@ -284,8 +284,9 @@ function decodeLink(kind, fragment) {
     var vs = p.substring(0, dot);
     if (!/^[0-9]+$/.test(vs)) return ok(broken);
     var v = parseInt(vs, 10);
-    if (v > VERSION) return ok({ kind: "new", version: v });
+    if (v > (kind === "playlist" ? PLAYLIST_VERSION : VERSION)) return ok({ kind: "new", version: v });
     if (v < 1) return ok(broken);
+    if (v === 2) return ok(decodeV2(p.substring(dot + 1)) || broken);
     var bytes;
     try { bytes = b64url(p.substring(dot + 1)); } catch (e) { return ok(broken); }
     if (!bytes.length) return ok(broken);
@@ -398,6 +399,104 @@ function tile(id, onColour) {
   return t;
 }
 
+/* v2 playlist (ids only), same bytes as PlaylistIds.kt:
+   flags(1: sharer, 2: 66-bit ids) varint(count) varint(len)+name [varint(len)+sharer] ids(64|66 bits each, zero-padded) crc32&0xff */
+var CRC = (function () {
+  var t = [];
+  for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(b, len) {
+  var c = 0xffffffff;
+  for (var i = 0; i < len; i++) c = CRC[(c ^ b[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+var ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+function decodeV2(data) {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(data) || data.length % 4 === 1) return null;
+    var all = b64url(data);
+    if (all.length < 4) return null;
+    var n = all.length - 1;
+    if ((crc32(all, n) & 0xff) !== all[n]) return null;
+    var pos = 0;
+    function byte() { if (pos >= n) throw 0; return all[pos++]; }
+    function varint() {
+      var v = 0;
+      for (var shift = 0; shift <= 14; shift += 7) {
+        var x = byte();
+        v |= (x & 0x7f) << shift;
+        if (!(x & 0x80)) { if (shift > 0 && x === 0) throw 0; return v; }
+      }
+      throw 0;
+    }
+    function text() {
+      var len = varint();
+      if (len > 1024 || len > n - pos) throw 0;
+      var s = new TextDecoder("utf-8", { fatal: true }).decode(all.subarray(pos, pos + len));
+      pos += len;
+      return s;
+    }
+    var flags = byte();
+    if (flags & ~3) return null;
+    var count = varint();
+    if (count < 1 || count > 1000) return null;
+    var name = text(), sharer = flags & 1 ? text() : null, per = flags & 2 ? 66 : 64;
+    var idBytes = Math.ceil(count * per / 8);
+    if (n - pos !== idBytes) return null;
+    var bit = pos * 8;
+    function bits(k) {
+      var v = 0;
+      for (var i = 0; i < k; i++, bit++) v = (v << 1) | ((all[bit >> 3] >> (7 - (bit & 7))) & 1);
+      return v;
+    }
+    var songs = [], seen = {}, skipped = 0;
+    for (var s = 0; s < count; s++) {
+      var id = "";
+      for (var c = 0; c < 10; c++) id += ABC[bits(6)];
+      id += ABC[per === 66 ? bits(6) : bits(4) << 2];
+      if (!ID.test(id) || songs.length >= MAX_SONGS || seen[id]) { skipped++; continue; }
+      seen[id] = 1;
+      songs.push({ id: id, title: "", artist: "", lookup: true });
+    }
+    var pad = idBytes * 8 - count * per;
+    if (pad > 0 && bits(pad) !== 0) return null;
+    if (!songs.length) return null;
+    return { kind: "playlist", name: clip(name, 80) || "Shared playlist", sharer: clip(sharer, 60) || null, songs: songs, skipped: skipped, lookup: true };
+  } catch (e) {
+    return null;
+  }
+}
+
+/* Titles and artists for a v2 link, from YouTube's oEmbed, a few at a time. cb(i, {title,artist}|"gone"|null) */
+var LOOKUP_PARALLEL = 4, LOOKUP_TIMEOUT = 10000;
+function lookupSongs(ids, cb) {
+  var next = 0;
+  function one(i) {
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, LOOKUP_TIMEOUT);
+    var url = "https://www.youtube.com/oembed?format=json&url=" + encodeURIComponent("https://www.youtube.com/watch?v=" + ids[i]);
+    return fetch(url, { credentials: "omit", referrerPolicy: "no-referrer", signal: ctl ? ctl.signal : undefined }).then(function (r) {
+      if (r.status === 400 || r.status === 401 || r.status === 403 || r.status === 404) return "gone";
+      if (!r.ok) return null;
+      return r.json().then(function (j) {
+        var t = clip(j && j.title, 200);
+        if (!t) return null;
+        var a = clip(String((j && j.author_name) || "").replace(/ - Topic$/, ""), 200);
+        return { title: t, artist: a };
+      });
+    }).catch(function () { return null; }).then(function (res) { clearTimeout(timer); cb(i, res); });
+  }
+  function worker() {
+    if (next >= ids.length) return Promise.resolve();
+    var i = next++;
+    return one(i).then(worker);
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(LOOKUP_PARALLEL, ids.length); k++) ws.push(worker());
+  return Promise.all(ws);
+}
+
 function $(id) { return document.getElementById(id); }
 function show(id) { $(id).hidden = false; }
 
@@ -420,16 +519,30 @@ function renderShared(r) {
   } else {
     $("title").textContent = r.name;
     $("sub").textContent = songs.length === 1 ? "1 song" : songs.length + " songs";
-    var ul = $("songs");
-    songs.forEach(function (s) {
+    var ul = $("songs"), rows = [];
+    songs.forEach(function (s, i) {
       var li = document.createElement("li"), t = document.createElement("div"), n = document.createElement("div"), a = document.createElement("div");
       t.className = "t"; n.className = "n"; a.className = "a";
-      n.textContent = s.title; a.textContent = s.artist;
+      if (s.lookup) { n.textContent = "Song " + (i + 1); a.textContent = "Loading\u2026"; li.className = "pending"; }
+      else { n.textContent = s.title; a.textContent = s.artist; }
       t.appendChild(n); t.appendChild(a);
       li.appendChild(tile(s.id, false)); li.appendChild(t);
       ul.appendChild(li);
+      rows.push({ li: li, n: n, a: a });
     });
     ul.hidden = false;
+    if (r.lookup) {
+      var failed = 0;
+      lookupSongs(songs.map(function (s) { return s.id; }), function (i, res) {
+        var row = rows[i];
+        row.li.className = "";
+        if (res && res !== "gone") { row.n.textContent = res.title; row.a.textContent = res.artist; }
+        else if (res === "gone") { row.a.textContent = "Not available"; row.li.className = "gone"; }
+        else { row.a.textContent = ""; failed++; }
+      }).then(function () {
+        document.body.setAttribute("data-lookup", failed === songs.length ? "failed" : failed ? "partial" : "done");
+      });
+    }
     if (r.skipped > 0) { $("more").textContent = r.skipped === 1 ? "1 unavailable song left out" : r.skipped + " unavailable songs left out"; show("more"); }
     $("get").textContent = "Get Minim to play it";
     document.title = r.name + " \u00b7 Minim";
