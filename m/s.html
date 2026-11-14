@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https://i.ytimg.com; connect-src https://www.youtube.com; font-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https://i.ytimg.com; connect-src https://www.youtube.com https://lrclib.net; font-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#ffffff">
 <title>Minim</title>
 <meta name="description" content="A song or a playlist shared from Minim, the minimal music app.">
@@ -68,6 +68,11 @@ h1{margin-top:22px;text-align:center;font-weight:700;font-size:24px;line-height:
 .problem h1{margin-top:10px}
 .problem p{margin-top:8px;font-size:15px;opacity:.75;line-height:1.5}
 footer{margin-top:30px;text-align:center;font-size:12px;opacity:.55;line-height:1.6}
+.starts{margin-top:6px;text-align:center;font-size:13px;font-weight:600;opacity:.7}
+.quote{margin:22px 0 0;padding:20px 22px;border-radius:22px;background:var(--soft);font-weight:700;font-size:21px;line-height:1.35;letter-spacing:-.2px;opacity:0;transition:opacity .4s ease}
+.quote.on{opacity:1}
+.quote span{display:block}
+.quote span+span{margin-top:6px}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -81,6 +86,8 @@ footer{margin-top:30px;text-align:center;font-size:12px;opacity:.55;line-height:
     <h1 id="title"></h1>
     <p class="sub" id="sub"></p>
     <p class="by" id="by" hidden></p>
+    <p class="starts" id="starts" hidden></p>
+    <blockquote class="quote" id="quote" hidden></blockquote>
     <ul class="songs" id="songs" hidden></ul>
     <p class="small" id="more" hidden></p>
     <div class="btns">
@@ -299,7 +306,12 @@ function decodeLink(kind, fragment) {
       }
       if (kind === "song") {
         if (typeof obj.i !== "string" || !ID.test(obj.i)) return ok(broken);
-        return ok({ kind: "song", song: song(obj.i, obj.t, obj.a), sharer: sharer });
+        var r = { kind: "song", song: song(obj.i, obj.t, obj.a), sharer: sharer };
+        /* 6.6.0 lyrics card: "s" start ms, "c" lines shared + "h" their CRC-32 (the words never travel) */
+        if (typeof obj.s === "number" && obj.s % 1 === 0 && obj.s > 0 && obj.s <= 21600000) r.start = obj.s;
+        if (typeof obj.c === "number" && obj.c % 1 === 0 && obj.c >= 1 && obj.c <= 5 &&
+            typeof obj.h === "number" && obj.h % 1 === 0 && obj.h >= 0 && obj.h <= 4294967295) { r.quoteCount = obj.c; r.quoteHash = obj.h; }
+        return ok(r);
       }
       if (!Array.isArray(obj.s)) return ok(broken);
       var songs = [], seen = {}, skipped = 0;
@@ -497,6 +509,70 @@ function lookupSongs(ids, cb) {
   return Promise.all(ws);
 }
 
+/* 6.6.0: the shared lines, found on LRCLIB by their count and CRC-32 (same rules as ShareLinks.quoteHash) */
+var QUOTE_TIMEOUT = 8000;
+function normLine(s) { return String(s).replace(/\s+/g, " ").trim(); }
+function lrcLines(synced) {
+  var out = [];
+  String(synced || "").split(/\r?\n/).forEach(function (raw) {
+    var m = /^\s*\[(\d+):(\d+)(?:[.:](\d+))?\]/.exec(raw);
+    if (!m) return;
+    var t = raw.substring(m[0].length).replace(/<[^>]*>/g, " ");
+    t = normLine(t);
+    if (t) out.push({ ms: (+m[1]) * 60000 + (+m[2]) * 1000 + (m[3] ? +((m[3] + "00").substring(0, 3)) : 0), t: t });
+  });
+  out.sort(function (a, b) { return a.ms - b.ms; });
+  return out.map(function (l) { return l.t; });
+}
+function plainLines(plain) {
+  return String(plain || "").split(/\r?\n/).map(normLine).filter(function (t) { return t; });
+}
+function quoteCrc(lines) {
+  var b = new TextEncoder().encode(lines.join("\n"));
+  return crc32(b, b.length);
+}
+function findQuote(lines, count, hash) {
+  for (var i = 0; i + count <= lines.length; i++) {
+    var w = lines.slice(i, i + count);
+    if (quoteCrc(w) === hash) return w;
+  }
+  return null;
+}
+function lrclib(params) {
+  var ctl = typeof AbortController === "function" ? new AbortController() : null;
+  var timer = setTimeout(function () { if (ctl) ctl.abort(); }, QUOTE_TIMEOUT);
+  return fetch("https://lrclib.net/api/search?" + params, { credentials: "omit", referrerPolicy: "no-referrer", signal: ctl ? ctl.signal : undefined })
+    .then(function (r) { return r.ok ? r.json() : []; })
+    .catch(function () { return []; })
+    .then(function (j) { clearTimeout(timer); return Array.isArray(j) ? j.slice(0, 12) : []; });
+}
+function loadQuote(r) {
+  var q = encodeURIComponent, title = r.song.title, artist = r.song.artist;
+  function scan(list) {
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i] || {};
+      var hit = findQuote(lrcLines(e.syncedLyrics), r.quoteCount, r.quoteHash) || findQuote(plainLines(e.plainLyrics), r.quoteCount, r.quoteHash);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  return lrclib("track_name=" + q(title) + "&artist_name=" + q(artist)).then(function (list) {
+    return scan(list) || lrclib("q=" + q(title + " " + artist)).then(scan);
+  }).then(function (hit) {
+    if (!hit) { document.body.setAttribute("data-quote", "none"); return; }
+    var box = $("quote");
+    hit.forEach(function (t) { var s = document.createElement("span"); s.textContent = t; box.appendChild(s); });
+    box.hidden = false;
+    requestAnimationFrame(function () { box.classList.add("on"); });
+    document.body.setAttribute("data-quote", "shown");
+  }).catch(function () { document.body.setAttribute("data-quote", "none"); });
+}
+function fmtStart(ms) {
+  var t = Math.floor(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  var two = function (n) { return (n < 10 ? "0" : "") + n; };
+  return h > 0 ? h + ":" + two(m) + ":" + two(s) : m + ":" + two(s);
+}
+
 function $(id) { return document.getElementById(id); }
 function show(id) { $(id).hidden = false; }
 
@@ -516,6 +592,8 @@ function renderShared(r) {
     y.href = "https://music.youtube.com/watch?v=" + r.song.id;
     y.hidden = false;
     document.title = r.song.title + " \u00b7 " + r.song.artist + " \u00b7 Minim";
+    if (r.start) { $("starts").textContent = "Starts at " + fmtStart(r.start); show("starts"); }
+    if (r.quoteCount && typeof TextEncoder === "function" && typeof fetch === "function") loadQuote(r);
   } else {
     $("title").textContent = r.name;
     $("sub").textContent = songs.length === 1 ? "1 song" : songs.length + " songs";
