@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.minim.music.debug",
+      "sha256_cert_fingerprints": [
+        "38:A7:9E:9E:78:C3:B7:E3:3E:ED:8A:FA:B2:05:75:9E:31:5A:76:1F:43:28:F5:E6:A1:C9:35:69:95:3C:9C:83"
+      ]
+    }
+  }
+]
